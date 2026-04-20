@@ -1,0 +1,23 @@
+{
+  "classes": [
+    " B",
+    " M"
+  ],
+  "layers": [
+    {
+      "units": 24,
+      "activation": "sigmoid",
+      "weights_initializer": "heUniform"
+    },
+    {
+      "units": 24,
+      "activation": "sigmoid",
+      "weights_initializer": "heUniform"
+    },
+    {
+      "units": 2,
+      "activation": "softmax",
+      "weights_initializer": "heUniform"
+    }
+  ]
+}

@@ -1,4 +1,38 @@
-"""Prepare dataset arrays for MLP training (features + labels + split)."""
+"""
+Dataset splitting program (train / validation).
+
+This program is the mandatory first step before training the network.
+It performs the following operations:
+
+  1. Read the raw CSV file (data/data.csv) using a predefined column schema
+     (the breast cancer dataset has no header row).
+
+  2. Select numeric feature columns, excluding non-informative ones
+     ('id' and 'diagnosis').
+
+  3. Z-score normalization of each feature:
+        x_normalized = (x - mean) / std
+     This brings all features to the same scale (~mean 0, std 1),
+     which is essential for gradient descent to converge properly.
+     Without normalization, features with large values (e.g. area_mean ~654)
+     would dominate features with small values (e.g. fractal_dimension_mean ~0.06).
+
+  4. Train / validation split:
+     - Train      : 80% of the data  -> used to adjust the weights
+     - Validation : 20% of the data  -> used to measure generalization
+     The dataset is randomly shuffled before splitting (fixed seed for
+     reproducibility).
+
+  5. Save:
+     - data/processed/dataset_splits.npz          : X_train, y_train, X_val, y_val arrays
+     - data/processed/preprocessing_metadata.json : means, stds, feature names
+       -> These parameters must be reused identically at prediction time.
+
+Usage
+-----
+    python3 -m src.prepare_data data/data.csv --target diagnosis
+    python3 -m src.prepare_data data/data.csv --target diagnosis --val-ratio 0.2 --seed 42
+"""
 
 import argparse
 import json

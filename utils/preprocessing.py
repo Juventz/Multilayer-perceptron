@@ -111,4 +111,5 @@ def extract_target(rows: list[dict[str, str]], target_column: str) -> np.ndarray
     missing = [index for index, row in enumerate(rows) if target_column not in row]
     if missing:
         raise ValueError(f"Target column '{target_column}' missing for row index {missing[0]}.")
-    return np.asarray([row[target_column] for row in rows])
+    # .strip() removes any leading/trailing whitespace that may be present in the CSV
+    return np.asarray([row[target_column].strip() for row in rows])
