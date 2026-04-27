@@ -55,9 +55,33 @@ v = 0.9 * v - lr * dW
 W = W + v
 ```
 
+The velocity `v` acts as memory of past gradients.
+With `momentum = 0.9`, 90% of the previous velocity is kept at each step,
+making convergence faster and smoother than plain SGD.
+
 At each epoch, the training data is shuffled and divided into small **mini-batches**
-(e.g. 32 samples). One full pass over all mini-batches = one epoch.
+(e.g. 8–32 samples). One full pass over all mini-batches = one epoch.
 The learning rate `lr` controls the size of each update step.
+
+### Z-score normalization
+
+Each feature is scaled to mean ≈ 0 and std ≈ 1:
+```
+x_normalized = (x - mean) / std
+```
+Without this, features with large values (`area_mean` ≈ 654) would dominate
+features with small values (`fractal_dimension_mean` ≈ 0.06).
+The normalization parameters (mean, std) are computed on the training set and
+reused at prediction time.
+
+### Learning curves
+
+Two graphs are displayed after training:
+1. **Loss** — train vs validation binary cross-entropy per epoch
+2. **Accuracy** — train vs validation accuracy per epoch
+
+Used to detect **overfitting** (val loss rises while train loss falls) or
+**underfitting** (both losses stay high).
 
 ---
 
@@ -399,43 +423,3 @@ Input (30 features)
 - **Optimizer:** mini-batch SGD (mandatory) / SGD with Momentum (bonus)
 - **Weight init:** He Uniform
 
----
-
-## Key concepts
-
-### Z-score normalization
-Each feature is scaled to mean ≈ 0 and std ≈ 1:
-```
-x_normalized = (x - mean) / std
-```
-Without this, features with large values (`area_mean` ≈ 654) would dominate
-features with small values (`fractal_dimension_mean` ≈ 0.06).
-
-### Backpropagation
-The chain rule is applied layer by layer in reverse order.
-The combined gradient of **softmax + cross-entropy** simplifies to:
-```
-delta = A_output - Y_onehot
-```
-This avoids computing the full softmax Jacobian matrix.
-
-### Mini-batch gradient descent
-Small batches of 8–32 samples balance stability (vs. single-sample updates)
-and speed (vs. full-dataset updates). Each epoch shuffles the data randomly.
-
-### Learning curves
-Two graphs are displayed after training:
-1. **Loss** — train vs validation binary cross-entropy per epoch
-2. **Accuracy** — train vs validation accuracy per epoch
-
-Used to detect **overfitting** (val loss rises while train loss falls) or
-**underfitting** (both losses stay high).
-
-### SGD with Momentum
-```
-v = momentum * v - lr * gradient
-W = W + v
-```
-The velocity `v` acts as memory of past gradients.
-With `momentum = 0.9`, 90% of the previous velocity is kept at each step,
-making convergence faster and smoother than plain SGD.
