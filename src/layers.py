@@ -13,8 +13,9 @@ For a batch of n samples, the computation of one layer is:
         b : biases,  shape (1, fan_out)  -> broadcast over n samples
 
 During backpropagation the layer receives the gradient of the loss with
-respect to its output, updates its weights W and b, then returns the
-gradient with respect to its input for the previous layer.
+respect to its output, computes the weight gradients (dW, db), delegates
+the parameter update to an optimizer, then returns the gradient with
+respect to its input for the previous layer.
 """
 
 import numpy as np
@@ -157,9 +158,14 @@ class DenseLayer:
         self._A = ACTIVATIONS[self.activation](self._Z)  # activation
         return self._A
 
-    def backward(self, delta: np.ndarray, learning_rate: float) -> np.ndarray:
+    def backward(
+        self,
+        delta: np.ndarray,
+        learning_rate: float = 0.01,
+        optimizer=None,
+    ) -> np.ndarray:
         """
-        Backward pass: compute gradients and update W and b in-place.
+        Backward pass: compute gradients and update W and b.
 
         How backpropagation works
         --------------------------
@@ -175,18 +181,18 @@ class DenseLayer:
         The combined derivative of softmax + cross-entropy is simply (A - Y).
         We therefore pass delta = (A - Y) directly and skip the f'(Z) computation
         (which would require computing the full softmax Jacobian matrix).
-        This well-known simplification avoids an expensive and complex calculation.
 
-        Weight update (gradient descent)
-        ---------------------------------
-        W <- W - learning_rate * dL/dW
-        b <- b - learning_rate * dL/db
+        Weight update
+        -------------
+        If an optimizer is provided, it handles the update (Adam, RMSprop, etc.).
+        Otherwise, plain SGD is applied: W -= lr * dW.
 
         Args:
             delta:
                 - Softmax output layer: delta = (A - Y_onehot), unnormalized.
                 - Hidden layer: delta = dL/dA flowing back from the next layer.
-            learning_rate: Step size for gradient descent.
+            learning_rate: Used only when no optimizer is provided (plain SGD).
+            optimizer:     Optional optimizer object (see src/optimizers.py).
 
         Returns:
             dA_prev: Gradient dL/dX to pass as `delta` to the previous layer.
@@ -196,7 +202,6 @@ class DenseLayer:
         # ---- Compute dZ = dL/dZ ------------------------------------------
         if self.activation == "softmax":
             # Combined softmax + cross-entropy gradient: dZ = (A - Y)
-            # Division by n is done below when computing dW and db
             dZ = delta
         elif self.activation == "relu":
             # ReLU: derivative depends on the sign of Z (pre-activation)
@@ -206,16 +211,18 @@ class DenseLayer:
             dZ = delta * DERIVATIVES[self.activation](self._A)
 
         # ---- Parameter gradients -----------------------------------------
-        # dW: averaged over the batch for a stable gradient estimate
         dW = self._input.T @ dZ / n
-        # db: sum over the batch columns, normalized by n
         db = np.sum(dZ, axis=0, keepdims=True) / n
-        # dA_prev: gradient to pass to the previous layer (not normalized by n)
         dA_prev = dZ @ self.W.T
 
-        # ---- Parameter update (gradient descent) -------------------------
-        self.W -= learning_rate * dW
-        self.b -= learning_rate * db
+        # ---- Parameter update --------------------------------------------
+        if optimizer is not None:
+            # Delegate update to the optimizer (Adam, RMSprop, etc.)
+            optimizer.update(self, dW, db)
+        else:
+            # Plain SGD fallback
+            self.W -= learning_rate * dW
+            self.b -= learning_rate * db
 
         return dA_prev
 

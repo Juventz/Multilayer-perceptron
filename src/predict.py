@@ -1,25 +1,25 @@
 """
-Prediction program using a pre-trained MLP model.
+Prediction program using a pre-trained MLP model (mandatory).
 
 This program:
   1. Loads the saved model (weights + architecture) from a .npy file.
   2. Loads and normalizes a new CSV dataset using the same normalization
-     parameters (means and standard deviations) that were used at training time.
+     parameters (means and stds) that were used at training time.
   3. Runs the forward pass to obtain predicted probabilities.
   4. Evaluates performance using the binary cross-entropy formula:
         E = -(1/N) * sum( y * log(p) + (1 - y) * log(1 - p) )
      where p = P(Malignant | x), y = 1 if malignant, 0 if benign.
-  5. Displays predictions and metrics.
+  5. Displays predictions, binary cross-entropy, and accuracy.
+
+For extended evaluation (precision, recall, F1, confusion matrix),
+see the bonus program: src/train_bonus.py --predict
 
 Why reuse the same normalization parameters?
 --------------------------------------------
-During training, each feature was standardized as:
-    x_normalized = (x - mean) / std
+During training, each feature was standardized as x = (x - mean) / std
 where mean and std were computed on the training set.
-
-At prediction time we MUST apply the exact same transformation.
-Using different means or stds would shift the feature values to a
-different scale, making all predictions meaningless.
+At prediction time we MUST apply the exact same transformation —
+different parameters would make all predictions meaningless.
 
 Usage
 -----
@@ -49,9 +49,6 @@ def load_model(model_path: str) -> tuple[Network, list[str]]:
         - 'layers'  : each layer's config (units, activation, initializer)
         - 'weights' : list of {'W': ..., 'b': ...} for each layer
 
-    DenseLayer objects are recreated from the config, then their weight
-    matrices are reassigned directly (bypassing re-initialization).
-
     Args:
         model_path: Path to the .npy model file.
 
@@ -69,16 +66,13 @@ def load_model(model_path: str) -> tuple[Network, list[str]]:
     # allow_pickle=True is required because the .npy file contains a Python dict
     model_data: dict = np.load(model_path, allow_pickle=True).item()
 
-    # np.load may convert lists to numpy arrays -> force conversion to Python list
+    # np.load may convert lists to numpy arrays -> force to Python list
     classes: list[str] = list(model_data["classes"])
 
-    # Recreate layers from saved configuration
     layer_list = [
         DenseLayer(cfg["units"], cfg["activation"], cfg["weights_initializer"])
         for cfg in model_data["layers"]
     ]
-
-    # Directly reassign saved weights (no random re-initialization)
     for layer, w_dict in zip(layer_list, model_data["weights"]):
         layer.W = w_dict["W"]
         layer.b = w_dict["b"]
@@ -97,12 +91,6 @@ def binary_crossentropy_eval(
     Formula (from the subject):
         E = -(1/N) * sum_n( y_n * log(p_n) + (1 - y_n) * log(1 - p_n) )
 
-    Meaning of each term:
-        y_n * log(p_n)          : penalizes when the sample is positive (M) but p is low
-        (1 - y_n) * log(1-p_n) : penalizes when the sample is negative (B) but 1-p is low
-
-    Clipping prevents log(0) = -inf which would produce NaN.
-
     Args:
         p_positive: Predicted probabilities for the positive class (M), shape (n,).
         y_binary:   Binary labels: 1.0 for M, 0.0 for B, shape (n,).
@@ -119,42 +107,20 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Predict and evaluate with a pre-trained MLP model.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "dataset",
-        type=str,
-        help="Path to the CSV file to run predictions on.",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="saved_model.npy",
-        help="Path to the saved .npy model file.",
-    )
-    parser.add_argument(
-        "--metadata",
-        type=str,
-        default="data/processed/preprocessing_metadata.json",
-        help=(
-            "Path to preprocessing metadata (feature names, means, stds). "
-            "Must be the same file generated during the split step."
-        ),
-    )
+    parser.add_argument("dataset", type=str, help="Path to the CSV file to predict on.")
+    parser.add_argument("--model",    type=str, default="saved_model.npy")
+    parser.add_argument("--metadata", type=str, default="data/processed/preprocessing_metadata.json")
     return parser
 
 
 def main() -> None:
-    """Entry point of the prediction program."""
+    """Entry point of the mandatory prediction program."""
     parser = _build_parser()
     args = parser.parse_args()
 
-    # ---- Load model ------------------------------------------------------
     network, classes = load_model(args.model)
-
-    # Index of the positive class (malignant = 'M') in the sorted class list
-    # classes is sorted alphabetically: ['B', 'M'], so idx_M = 1
     m_idx = classes.index("M")
 
-    # ---- Load normalization metadata -------------------------------------
     meta_path = Path(args.metadata)
     if not meta_path.exists():
         raise FileNotFoundError(f"Metadata not found: '{args.metadata}'.")
@@ -162,25 +128,19 @@ def main() -> None:
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
 
-    features: list[str] = meta["features"]   # names of the 30 features
-    means = np.array(meta["means"])           # means computed on the training set
-    stds  = np.array(meta["stds"])            # stds computed on the training set
+    features: list[str] = meta["features"]
+    means = np.array(meta["means"])
+    stds  = np.array(meta["stds"])
 
-    # ---- Load and normalize data -----------------------------------------
-    # IMPORTANT: reuse the same means/stds from training.
-    # Normalizing with different parameters would produce wrong predictions.
     fieldnames, rows = parse_csv_with_fieldnames(args.dataset, BREAST_CANCER_FIELDS)
     X, _, _ = build_feature_matrix(rows, features, means=means, stds=stds)
 
-    # ---- Forward pass (inference) ----------------------------------------
-    # Each row of A contains [P(Benign), P(Malignant)] for one sample
+    # Forward pass: each row of A is [P(Benign), P(Malignant)]
     A = network.forward(X)
-
-    # Predicted class = index of the highest probability
     pred_indices = np.argmax(A, axis=1)
     confidences  = np.max(A, axis=1)
 
-    # ---- Display predictions ---------------------------------------------
+    # Display predictions
     print(f"\n{'#':>6}  {'Prediction':>12}  {'Confidence':>10}  P(Benign)  P(Malignant)")
     print("-" * 65)
     for i, (pred_idx, conf) in enumerate(zip(pred_indices, confidences)):
@@ -190,20 +150,13 @@ def main() -> None:
             f"{A[i, 0]:>9.4f}  {A[i, 1]:>11.4f}"
         )
 
-    # ---- Evaluation (if ground-truth labels are available) ---------------
+    # Evaluate if ground-truth labels are available
     try:
         y_true = np.array([row["diagnosis"].strip() for row in rows])
-
-        # Binary labels: 1 for M (malignant), 0 for B (benign)
         y_binary = (y_true == "M").astype(float)
-
-        # Predicted probabilities for the malignant class
         p_malignant = A[:, m_idx]
-
-        # Binary cross-entropy (formula from the subject)
         bce = binary_crossentropy_eval(p_malignant, y_binary)
 
-        # Accuracy: fraction of correctly classified samples
         y_true_int, _, _ = encode_labels(y_true)
         correct = int(np.sum(pred_indices == y_true_int))
         acc = correct / len(y_true_int)
@@ -214,7 +167,6 @@ def main() -> None:
         print(f"{'─' * 40}")
 
     except KeyError:
-        # No 'diagnosis' column found -> pure prediction mode (no ground truth)
         print("\n(No 'diagnosis' column found -> evaluation skipped.)")
 
 

@@ -3,7 +3,14 @@ my_env/
 .venv/
 venv/
 env/
+myenv/
 
 # Python cache and temporary files
 __pycache__/
 .pytest_cache/
+
+# Generated files (produced by the training pipeline)
+saved_model.npy
+comparison.png
+learning_curves.png
+data/processed/

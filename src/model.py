@@ -1,5 +1,5 @@
 """
-Network container and training loop (Model).
+Network container, training loop (Model), and curve comparison utility.
 
 Overall MLP architecture
 -------------------------
@@ -17,13 +17,18 @@ For each epoch:
   3. For each mini-batch:
      a. Forward pass  -> predictions A
      b. Compute initial gradient: delta = A - Y_onehot
-     c. Backward pass -> update all W and b
+     c. Backward pass -> update all W and b (via the chosen optimizer)
   4. Compute loss and accuracy on train + validation (for display).
-  5. Record metrics in the history dictionary.
+  5. Check early stopping condition (if enabled).
 
 After training:
   - Save the model (weights + architecture) to a .npy file.
   - Display learning curves (loss and accuracy).
+  - Print classification report (precision, recall, F1).
+
+Bonus utilities
+---------------
+  - plot_histories() : overlay multiple training runs on the same graph.
 """
 
 import json
@@ -33,6 +38,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.layers import DenseLayer
+from src.optimizers import SGD
 
 
 class Network:
@@ -42,7 +48,7 @@ class Network:
     Responsibilities:
     - Initialize the weights of all layers in sequence.
     - Run the forward pass by cascading through each layer.
-    - Run the backward pass in reverse order.
+    - Run the backward pass in reverse order, passing the optimizer.
     """
 
     def __init__(self, layers: list[DenseLayer]) -> None:
@@ -71,14 +77,12 @@ class Network:
         current_dim = input_dim
         for layer in self.layers:
             layer.initialize(current_dim, rng)
-            current_dim = layer.units  # output of this layer = input of the next
+            current_dim = layer.units
         self.initialized = True
 
     def forward(self, X: np.ndarray) -> np.ndarray:
         """
         Forward pass: propagate X through all layers sequentially.
-
-        Each layer receives the output (A) of the previous layer.
 
         Args:
             X: Input data of shape (n_samples, n_features).
@@ -92,17 +96,23 @@ class Network:
             A = layer.forward(A)
         return A
 
-    def backward(self, delta: np.ndarray, learning_rate: float) -> None:
+    def backward(
+        self,
+        delta: np.ndarray,
+        learning_rate: float = 0.01,
+        optimizer=None,
+    ) -> None:
         """
         Backward pass: propagate the gradient through all layers in reverse
         order and update each layer's parameters.
 
         Args:
-            delta: Initial gradient = (A_output - Y_onehot) for softmax + cross-entropy.
-            learning_rate: Step size for gradient descent.
+            delta:         Initial gradient = (A_output - Y_onehot).
+            learning_rate: Used when no optimizer is provided (plain SGD).
+            optimizer:     Optional optimizer (Adam, RMSprop, etc.).
         """
         for layer in reversed(self.layers):
-            delta = layer.backward(delta, learning_rate)
+            delta = layer.backward(delta, learning_rate, optimizer)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +155,7 @@ def compute_accuracy(A: np.ndarray, y_int: np.ndarray) -> float:
     Returns:
         Fraction of correctly classified samples (between 0 and 1).
     """
-    predictions = np.argmax(A, axis=1)  # predicted class = index of max probability
+    predictions = np.argmax(A, axis=1)
     return float(np.mean(predictions == y_int))
 
 
@@ -157,9 +167,6 @@ def encode_labels(y: np.ndarray) -> tuple[np.ndarray, np.ndarray, list[str]]:
         classes  = ['B', 'M']   (alphabetical order)
         y_int    = [0, 1, 0, ...]
         Y_onehot = [[1,0], [0,1], [1,0], ...]
-
-    One-hot encoding is required for the initial gradient computation
-    (delta = A - Y_onehot) and for the loss calculation.
 
     Args:
         y: String labels, shape (n_samples,).
@@ -189,6 +196,8 @@ class Model:
     --------------------------------
         from src.layers import DenseLayer
         from src.model import Model
+        from src.optimizers import Adam
+        from src.callbacks import EarlyStopping
 
         model = Model()
         network = model.createNetwork([
@@ -197,11 +206,12 @@ class Model:
             DenseLayer(2,  activation='softmax', weights_initializer='heUniform'),
         ])
         model.fit(network, X_train, y_train, X_val, y_val,
-                  loss='categoricalCrossentropy', learning_rate=0.0314,
-                  batch_size=8, epochs=84)
+                  optimizer=Adam(learning_rate=0.001),
+                  epochs=100,
+                  early_stopping=EarlyStopping(patience=15))
 
     Or via the CLI (see src/train.py):
-        python3 -m src.train --layer 24 24 --epochs 84 --learning_rate 0.0314
+        python3 -m src.train --layer 24 24 --optimizer adam --early_stopping
     """
 
     def createNetwork(self, layer_list: list[DenseLayer]) -> Network:
@@ -230,6 +240,8 @@ class Model:
         epochs: int = 100,
         seed: int = 42,
         save_path: str = "saved_model.npy",
+        optimizer=None,
+        early_stopping=None,
     ) -> dict:
         """
         Train the network using mini-batch gradient descent and backpropagation.
@@ -242,46 +254,55 @@ class Model:
           3. For each mini-batch:
              - forward()  : compute predictions A
              - delta = A - Y_onehot  (combined softmax + cross-entropy gradient)
-             - backward() : update all W and b
-          4. Compute metrics (loss and accuracy) on the full train and val sets.
-          5. Print: epoch 01/70 - loss: X.XXXX - val_loss: X.XXXX
+             - backward() : propagate gradients, update W and b via optimizer
+          4. Compute metrics on the full train and val sets.
+          5. Check early stopping condition.
 
         Args:
-            network:       Network created by createNetwork().
-            X_train:       Normalized feature matrix (n_train, n_features).
-            y_train:       String labels for training (n_train,).
-            X_val:         Normalized feature matrix (n_val, n_features).
-            y_val:         String labels for validation (n_val,).
-            loss:          Loss function name. Only 'categoricalCrossentropy' supported.
-            learning_rate: Step size for gradient descent.
-            batch_size:    Number of samples per mini-batch.
-            epochs:        Number of full passes over the training set.
-            seed:          Random seed for weight initialization and shuffling.
-            save_path:     Path to the .npy file for saving the model.
+            network:         Network created by createNetwork().
+            X_train:         Normalized feature matrix (n_train, n_features).
+            y_train:         String labels for training (n_train,).
+            X_val:           Normalized feature matrix (n_val, n_features).
+            y_val:           String labels for validation (n_val,).
+            loss:            Loss function name. Only 'categoricalCrossentropy' supported.
+            learning_rate:   Used when optimizer=None (creates a plain SGD optimizer).
+            batch_size:      Number of samples per mini-batch.
+            epochs:          Maximum number of full passes over the training set.
+            seed:            Random seed for weight initialization and shuffling.
+            save_path:       Path to the .npy file for saving the model.
+            optimizer:       Optimizer instance (Adam, RMSprop, etc.).
+                             If None, plain SGD with `learning_rate` is used.
+            early_stopping:  EarlyStopping instance. If None, training runs for
+                             all `epochs` without early termination.
 
         Returns:
             History dictionary with keys:
                 'train_loss', 'val_loss', 'train_accuracy', 'val_accuracy'
-            Each key maps to a list of floats (one value per epoch).
+            Each key maps to a list of floats (one value per completed epoch).
         """
         if loss != "categoricalCrossentropy":
             raise ValueError(f"Loss '{loss}' not supported. Use 'categoricalCrossentropy'.")
         if network.layers[-1].activation != "softmax":
             raise ValueError("The output layer must use the 'softmax' activation.")
 
+        # Default to plain SGD if no optimizer is provided
+        if optimizer is None:
+            optimizer = SGD(learning_rate)
+
+        # Reset early stopping state for this training run
+        if early_stopping is not None:
+            early_stopping.reset()
+
         # ---- Label encoding ----------------------------------------------
-        # Convert 'B'/'M' strings to [1,0]/[0,1] one-hot vectors
         y_train_int, Y_train_onehot, classes = encode_labels(y_train)
         y_val_int,   Y_val_onehot,   _       = encode_labels(y_val)
 
         # ---- Weight initialization ---------------------------------------
-        # Weight matrix dimensions are inferred from the data shape
         network.initialize(X_train.shape[1], seed)
 
-        # Random generator for shuffling data at each epoch
         rng = np.random.default_rng(seed)
         n_train = X_train.shape[0]
-        n_digits = len(str(epochs))  # for zero-padding the epoch number
+        n_digits = len(str(epochs))
 
         history: dict[str, list[float]] = {
             "train_loss": [],
@@ -293,7 +314,7 @@ class Model:
         # ---- Training loop -----------------------------------------------
         for epoch in range(1, epochs + 1):
 
-            # 1. Shuffle the training data (new order at each epoch)
+            # 1. Shuffle the training data
             perm = rng.permutation(n_train)
             X_shuf = X_train[perm]
             Y_shuf = Y_train_onehot[perm]
@@ -303,17 +324,16 @@ class Model:
                 X_batch = X_shuf[start : start + batch_size]
                 Y_batch = Y_shuf[start : start + batch_size]
 
-                # a. Forward pass: compute predicted probabilities
+                # Forward pass
                 A_batch = network.forward(X_batch)
 
-                # b. Combined softmax + cross-entropy gradient: delta = A - Y
-                #    (division by n is handled inside DenseLayer.backward)
+                # Combined softmax + cross-entropy gradient: delta = A - Y
                 delta = A_batch - Y_batch
 
-                # c. Backward pass: backpropagate and update weights
-                network.backward(delta, learning_rate)
+                # Backward pass with chosen optimizer
+                network.backward(delta, learning_rate, optimizer)
 
-            # 3. Epoch metrics (computed on the full dataset, not just the last batch)
+            # 3. Epoch metrics
             A_train = network.forward(X_train)
             A_val   = network.forward(X_val)
 
@@ -327,7 +347,7 @@ class Model:
             history["train_accuracy"].append(train_acc)
             history["val_accuracy"].append(val_acc)
 
-            # 4. Display every epoch (format required by the subject)
+            # 4. Per-epoch display
             print(
                 f"epoch {epoch:0{n_digits}}/{epochs} - "
                 f"loss: {train_loss:.4f} - "
@@ -336,12 +356,20 @@ class Model:
                 f"val_acc: {val_acc:.4f}"
             )
 
+            # 5. Early stopping check
+            if early_stopping is not None:
+                monitor_value = (
+                    val_loss if early_stopping.monitor == "val_loss" else val_acc
+                )
+                if early_stopping.check(monitor_value, network, epoch):
+                    break
+
         # ---- Save the model ----------------------------------------------
         if save_path:
             self._save_model(network, classes, save_path)
 
         # ---- Learning curves ---------------------------------------------
-        self._plot_curves(history, epochs)
+        self._plot_curves(history, len(history["train_loss"]))
 
         return history
 
@@ -380,27 +408,21 @@ class Model:
         np.save(save_path, model_data)
         print(f"> saving model '{save_path}' to disk...")
 
-    def _plot_curves(self, history: dict, epochs: int) -> None:
+    def _plot_curves(self, history: dict, n_epochs: int) -> None:
         """
-        Display and save two learning curve graphs:
+        Display and save the two learning curve graphs:
           1. Loss (train vs validation) over epochs.
           2. Accuracy (train vs validation) over epochs.
 
-        These curves help diagnose:
-          - Underfitting: train loss stays high -> model too simple or lr too low.
-          - Overfitting:  val loss rises while train loss falls -> model too complex.
-          - Good fit:     both curves decrease and stabilize close together.
-
         Args:
-            history: Dictionary filled by fit() with per-epoch metrics.
-            epochs:  Total number of epochs (x-axis range).
+            history:  Dictionary filled by fit() with per-epoch metrics.
+            n_epochs: Actual number of epochs completed (may be < max if early stopping).
         """
-        epoch_range = range(1, epochs + 1)
+        epoch_range = range(1, n_epochs + 1)
 
         fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 5))
         fig.suptitle("Learning Curves", fontsize=14)
 
-        # --- Graph 1: Loss ---
         ax_loss.plot(epoch_range, history["train_loss"],
                      label="train",      color="#2196F3", linewidth=1.5)
         ax_loss.plot(epoch_range, history["val_loss"],
@@ -411,7 +433,6 @@ class Model:
         ax_loss.legend()
         ax_loss.grid(alpha=0.3)
 
-        # --- Graph 2: Accuracy ---
         ax_acc.plot(epoch_range, history["train_accuracy"],
                     label="train",      color="#2196F3", linewidth=1.5)
         ax_acc.plot(epoch_range, history["val_accuracy"],
@@ -427,3 +448,74 @@ class Model:
         plt.savefig("learning_curves.png", dpi=150, bbox_inches="tight")
         print("Learning curves saved to 'learning_curves.png'")
         plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Bonus utility: compare multiple training histories on the same graph
+# ---------------------------------------------------------------------------
+
+def plot_histories(
+    histories: list[tuple[str, dict]],
+    save_path: str = "comparison.png",
+) -> None:
+    """
+    Overlay multiple training histories on the same graphs for easy comparison.
+
+    Useful for comparing:
+    - Different architectures (e.g. [24,24] vs [48,48] vs [24,24,24])
+    - Different optimizers (SGD vs Adam vs RMSprop)
+    - Different hyperparameters (learning rates, batch sizes)
+    - Effect of early stopping
+
+    Args:
+        histories:  List of (label, history_dict) tuples, where history_dict
+                    is the dictionary returned by Model.fit().
+                    Example: [("Adam lr=0.001", h1), ("SGD lr=0.01", h2)]
+        save_path:  Path to save the comparison plot (default: 'comparison.png').
+
+    Example:
+        h1 = model.fit(net1, ...)
+        h2 = model.fit(net2, ...)
+        plot_histories([("Adam", h1), ("SGD", h2)])
+    """
+    if not histories:
+        raise ValueError("histories list is empty.")
+
+    # Use a colormap to auto-assign distinct colors
+    colors = plt.cm.tab10.colors
+
+    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Model Comparison — Learning Curves", fontsize=14)
+
+    for idx, (label, history) in enumerate(histories):
+        color = colors[idx % len(colors)]
+        n = len(history["train_loss"])
+        epoch_range = range(1, n + 1)
+
+        ax_loss.plot(epoch_range, history["train_loss"],
+                     label=f"{label} (train)", color=color, linewidth=1.5)
+        ax_loss.plot(epoch_range, history["val_loss"],
+                     label=f"{label} (val)",   color=color, linewidth=1.5, linestyle="--")
+
+        ax_acc.plot(epoch_range, history["train_accuracy"],
+                    label=f"{label} (train)", color=color, linewidth=1.5)
+        ax_acc.plot(epoch_range, history["val_accuracy"],
+                    label=f"{label} (val)",   color=color, linewidth=1.5, linestyle="--")
+
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Binary Cross-Entropy Loss")
+    ax_loss.set_title("Loss Comparison")
+    ax_loss.legend(fontsize=8)
+    ax_loss.grid(alpha=0.3)
+
+    ax_acc.set_xlabel("Epoch")
+    ax_acc.set_ylabel("Accuracy")
+    ax_acc.set_title("Accuracy Comparison")
+    ax_acc.set_ylim(0, 1.05)
+    ax_acc.legend(fontsize=8)
+    ax_acc.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"Comparison plot saved to '{save_path}'")
+    plt.show()
