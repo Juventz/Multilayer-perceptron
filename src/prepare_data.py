@@ -10,18 +10,19 @@ It performs the following operations:
   2. Select numeric feature columns, excluding non-informative ones
      ('id' and 'diagnosis').
 
-  3. Z-score normalization of each feature:
-        x_normalized = (x - mean) / std
-     This brings all features to the same scale (~mean 0, std 1),
-     which is essential for gradient descent to converge properly.
-     Without normalization, features with large values (e.g. area_mean ~654)
-     would dominate features with small values (e.g. fractal_dimension_mean ~0.06).
-
-  4. Train / validation split:
+  3. Train / validation split (on the raw rows, before normalization):
      - Train      : 80% of the data  -> used to adjust the weights
      - Validation : 20% of the data  -> used to measure generalization
      The dataset is randomly shuffled before splitting (fixed seed for
      reproducibility).
+
+  4. Z-score normalization of each feature:
+        x_normalized = (x - mean) / std
+     Means and stds are computed on the TRAINING split only, then reused
+     to normalize the validation split (and later, at prediction time).
+     This brings all features to the same scale (~mean 0, std 1),
+     which is essential for gradient descent to converge properly, and
+     avoids leaking validation-set statistics into the training data.
 
   5. Save:
      - data/processed/dataset_splits.npz          : X_train, y_train, X_val, y_val arrays
@@ -37,16 +38,33 @@ Usage
 import argparse
 import json
 from pathlib import Path
+
 import numpy as np
 
 from utils.csv_utils import parse_csv_with_fieldnames
 from utils.datasets import BREAST_CANCER_FIELDS
-from utils.data_split import train_val_split
 from utils.preprocessing import (
     build_feature_matrix,
     extract_target,
     get_numeric_features,
 )
+
+
+def _split_rows(rows, val_ratio: float, seed: int):
+    """
+    Split raw rows into train/validation subsets *before* any normalization,
+    so that feature means/stds are computed on the training rows only
+    (avoids leaking validation statistics into the training distribution).
+    """
+    n_samples = len(rows)
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n_samples)
+    val_size = int(n_samples * val_ratio)
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+    train_rows = [rows[i] for i in train_indices]
+    val_rows = [rows[i] for i in val_indices]
+    return train_rows, val_rows
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -88,15 +106,14 @@ def main() -> None:
     if not features:
         raise ValueError("No numeric features found after exclusions.")
 
-    X, means, stds = build_feature_matrix(rows, features)
-    y = extract_target(rows, args.target)
+    # Split raw rows first so normalization stats never see the validation set.
+    train_rows, val_rows = _split_rows(rows, val_ratio=args.val_ratio, seed=args.seed)
 
-    X_train, y_train, X_val, y_val = train_val_split(
-        X,
-        y,
-        val_ratio=args.val_ratio,
-        random_seed=args.seed,
-    )
+    X_train, means, stds = build_feature_matrix(train_rows, features)
+    X_val, _, _ = build_feature_matrix(val_rows, features, means=means, stds=stds)
+
+    y_train = extract_target(train_rows, args.target)
+    y_val = extract_target(val_rows, args.target)
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +136,7 @@ def main() -> None:
         "stds": stds.tolist(),
         "val_ratio": args.val_ratio,
         "seed": args.seed,
-        "num_samples": int(X.shape[0]),
+        "num_samples": int(X_train.shape[0] + X_val.shape[0]),
     }
     with open(metadata_path, "w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2)
